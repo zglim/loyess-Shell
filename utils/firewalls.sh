@@ -121,14 +121,31 @@ firewall_status(){
     fi
 }
 
+get_ssh_port(){
+    local sshdConfig="${1:-/etc/ssh/sshd_config}"
+    local sshdPort=''
+
+    if [ -r "${sshdConfig}" ]; then
+        # Pick the first active (non-commented) "Port <number>" directive.
+        # awk's default field splitting tolerates leading whitespace and any
+        # mix of spaces/tabs, and tolower() makes the keyword case-insensitive,
+        # so indented / tab-separated / lowercase forms are all recognised.
+        # Commented lines (#Port / # Port) make $1 non-"port" and are skipped.
+        sshdPort=$(awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "${sshdConfig}" 2>/dev/null)
+    fi
+
+    # Fall back to the default SSH port when nothing valid is configured.
+    case "${sshdPort}" in
+        ''|*[!0-9]*) sshdPort=22 ;;
+    esac
+
+    printf '%s\n' "${sshdPort}"
+}
+
 add_ssh_port(){
     local sshdPort
+    sshdPort=$(get_ssh_port)
 
-    if $(grep -qwE "^Port" /etc/ssh/sshd_config); then
-        sshdPort=$(cat /etc/ssh/sshd_config | grep -wE "^Port" | cut -d\  -f2)
-    else
-        sshdPort=22
-    fi
     if [ "${FIREWALL_MANAGE_TOOL}" = 'firewall-cmd' ]; then
         if firewall-cmd --list-ports --permanent 2>/dev/null | grep -qw "${sshdPort}/tcp"; then
             return
