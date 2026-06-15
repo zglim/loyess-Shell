@@ -78,14 +78,34 @@ sip003_way_start(){
 }
 
 nginx_start(){
-    if [ -e "${NGINX_BIN_PATH}" ] && [ -e "${WEB_INSTALL_MARK}" ]; then
-        systemctl start nginx
-        
-        if $(systemctl status nginx | grep -q '\(running\)'); then 
-            echo "Starting nginx success"
-        else
-            echo "Starting nginx failed"
-        fi
+    if [ ! -e "${WEB_INSTALL_MARK}" ]; then
+        return 0
+    fi
+
+    if [ ! -e "${NGINX_BIN_PATH}" ]; then
+        echo "Starting nginx failed (binary not found: ${NGINX_BIN_PATH})"
+        return 1
+    fi
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "Starting nginx failed (systemctl not available)"
+        return 1
+    fi
+
+    # Already running
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        echo "nginx is already running"
+        return 0
+    fi
+
+    # Attempt to start
+    systemctl start nginx 2>/dev/null
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        echo "Starting nginx success"
+        return 0
+    else
+        echo "Starting nginx failed"
+        return 1
     fi
 }
 
