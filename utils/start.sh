@@ -78,15 +78,47 @@ sip003_way_start(){
 }
 
 nginx_start(){
-    if [ -e "${NGINX_BIN_PATH}" ] && [ -e "${WEB_INSTALL_MARK}" ]; then
-        systemctl start nginx
-        
-        if $(systemctl status nginx | grep -q '\(running\)'); then 
-            echo "Starting nginx success"
-        else
-            echo "Starting nginx failed"
-        fi
+    # nginx is only managed when the web masquerade mark is present.
+    if [ ! -e "${WEB_INSTALL_MARK}" ]; then
+        return 0
     fi
+
+    # caddy takes precedence as the web server (see the web server selection in
+    # ss-plugins.sh). When caddy is installed nginx is not the active web
+    # service, so there is nothing for this function to do here.
+    if [ -e "${CADDY_BIN_PATH}" ]; then
+        return 0
+    fi
+
+    # Web masquerade is enabled and nginx is the expected web server, but its
+    # binary is missing. Report a clear failure instead of silently passing.
+    if [ ! -e "${NGINX_BIN_PATH}" ]; then
+        echo "Starting nginx failed: nginx binary not found at ${NGINX_BIN_PATH}"
+        return 1
+    fi
+
+    # nginx is driven through systemd; without systemctl it cannot be managed.
+    if ! command -v systemctl > /dev/null 2>&1; then
+        echo "Starting nginx failed: systemctl is not available"
+        return 1
+    fi
+
+    # Already running: report it and treat as success.
+    if systemctl is-active nginx 2>/dev/null | head -n 1 | grep -qE '^active$'; then
+        echo "nginx is already running"
+        return 0
+    fi
+
+    systemctl start nginx
+
+    # Trust the real service state rather than the exit code of the start call.
+    if systemctl is-active nginx 2>/dev/null | head -n 1 | grep -qE '^active$'; then
+        echo "Starting nginx success"
+        return 0
+    fi
+
+    echo "Starting nginx failed"
+    return 1
 }
 
 start_services(){
