@@ -1,13 +1,19 @@
 improt_package "utils" "downloads.sh"
 
 
+# judge_is_num <value>
+# 接口约定：本函数【只通过退出码】表达判断结果，绝不向标准输出写入任何内容。
+#   <value> 为非空纯数字       -> 返回 0 (真)
+#   <value> 为空 / 含非数字字符 -> 返回 1 (假)
+# 因此调用方必须把它直接当作条件使用，例如：
+#       if judge_is_num "${x}"; then ...
+#   而【不能】写成 `if $(judge_is_num "${x}"); then`——那样会把它（空的）
+#   标准输出再当成命令执行，造成数值/字符串分流判断失真。
 judge_is_num(){
-    expr ${1} + 1 &>/dev/null
-    if [ $? -ne 0 ]; then
-        return 1
-    else
-        return 0
-    fi
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 judge_current_version_num_is_none_and_output_error_info(){
@@ -43,18 +49,38 @@ judge_not_update_when_simple_tls_is_specified_version(){
 update_download(){
     local downloadMark=$1
     local downloadFileName=$2
-    local SS_VERSION plugin_num
-    
+    local SS_VERSION plugin_num downloadType
+
+    # 先确定下载类型，再执行下载，避免空值/非法值默默落进某个下载分支：
+    #   纯数字标记                    -> 插件编号，走插件下载分支
+    #   ss-libev / ss-rust / go-ss2  -> 核心程序标记，走 Shadowsocks 下载分支
+    #   其余（空值或未知字符串）        -> 明确报错退出，不进入任何下载分支
+    # judge_is_num 仅以退出码表达结果，故这里直接用作条件判断（不要用 $(...) 捕获其输出）。
+    if judge_is_num "${downloadMark}"; then
+        downloadType="plugin"
+    else
+        case "${downloadMark}" in
+            ss-libev|ss-rust|go-ss2) downloadType="ss" ;;
+            *)
+                _echo -e "无法识别的下载标记 '${downloadMark}'，既不是插件编号也不是核心程序标记，退出运行."
+                exit 1
+                ;;
+        esac
+    fi
+
     TEMP_DIR_PATH=$(mktemp -d)
     trap "rm -rf $TEMP_DIR_PATH; exit" 2
     _echo -i "检测到${downloadFileName}有新版本，开始下载."
-    if $(judge_is_num "${downloadMark}"); then
+
+    # 两条下载分支共享上面的临时目录、trap 与下载提示，副作用各自独立、互不串线。
+    if [[ "${downloadType}" == "plugin" ]]; then
         plugin_num=${downloadMark}
         download_plugins_file
     else
         SS_VERSION=${downloadMark}
         download_ss_file
     fi
+
     _echo -i "${downloadFileName}下载完成，等待安装."
 }
 
