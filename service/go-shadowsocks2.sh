@@ -24,6 +24,9 @@ LOG=/var/log/go-shadowsocks2.log
 PID_DIR=/var/run
 PID_FILE=$PID_DIR/go-shadowsocks2.pid
 RET_VAL=0
+# Single source of truth for "is a plugin configured": set by get_config_args,
+# consumed by do_start / do_stop. 0 = no plugin, 1 = plugin enabled.
+UsePlugin=0
 
 [ -x $DAEMON ] || exit 0
 
@@ -73,13 +76,13 @@ get_config_args(){
         exit 1
     fi
 
-    ServerPort=$(cat ${JsonFilePath} | jq -r '.server_port // empty')
+    ServerPort=$(jq -r '.server_port // empty' "${JsonFilePath}")
     [ -z "$ServerPort" ] && echo -e "Configuration option 'server_port' acquisition failed" && exit 1
-    Password=$(cat ${JsonFilePath} | jq -r '.password // empty')
+    Password=$(jq -r '.password // empty' "${JsonFilePath}")
     [ -z "$Password" ] && echo -e "Configuration option 'password' acquisition failed" && exit 1
-    Method=$(cat ${JsonFilePath} | jq -r '.method // empty')
+    Method=$(jq -r '.method // empty' "${JsonFilePath}")
     [ -z "$Method" ] && echo -e "Configuration option 'method' acquisition failed" && exit 1
-    Mode=$(cat ${JsonFilePath} | jq -r '.mode // empty')
+    Mode=$(jq -r '.mode // empty' "${JsonFilePath}")
     [ -z "$Mode" ] && echo -e "Configuration option 'Mode' acquisition failed" && exit 1
 
     if [[ ${Method} == "aes-128-gcm" ]]; then
@@ -98,18 +101,27 @@ get_config_args(){
         Mode="-tcp -udp"
     fi
 
-    if $(cat ${JsonFilePath} | grep -qE 'plugin|plugin_opts'); then
-        Plugin=$(cat ${JsonFilePath} | jq -r '.plugin // empty')
-        [ -z "$Plugin" ] && echo -e "Configuration option 'plugin' acquisition failed" && exit 1
-        PluginOpts=$(cat ${JsonFilePath} | jq -r '.plugin_opts // empty')
-        [ -z "$PluginOpts" ] && echo -e "Configuration option 'plugin_opts' acquisition failed" && exit 1
+    # Decide once whether a plugin is configured, using jq (the authoritative
+    # parser) rather than grepping raw text. do_start / do_stop reuse UsePlugin
+    # so every code path agrees on the same answer.
+    UsePlugin=0
+    Plugin=$(jq -r '.plugin // empty' "${JsonFilePath}")
+    PluginOpts=$(jq -r '.plugin_opts // empty' "${JsonFilePath}")
+
+    if [ -n "$Plugin" ] || [ -n "$PluginOpts" ]; then
+        # A plugin was requested: both fields are mandatory. Fail loudly here
+        # instead of starting half a service with broken plugin arguments.
+        if [ -z "$Plugin" ]; then
+            echo -e "Configuration option 'plugin' acquisition failed"
+            exit 1
+        fi
+        if [ -z "$PluginOpts" ]; then
+            echo -e "Configuration option 'plugin_opts' acquisition failed"
+            exit 1
+        fi
+        UsePlugin=1
     fi
 }
-
-check_pid "${DAEMON}"
-check_pid_file "${GET_PID}" "${PID_FILE}"
-create_pid_dir "${PID_DIR}"
-get_config_args "${CONF}"
 
 check_running() {
     local PidFile=$1
@@ -148,7 +160,7 @@ do_start() {
         return 0
     fi
     ulimit -n 51200
-    if $(cat ${CONF} | grep -qE 'plugin|plugin_opts'); then
+    if [ "$UsePlugin" = "1" ]; then
         nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose -plugin ${Plugin} -plugin-opts "${PluginOpts}" > $LOG 2>&1 &
     else
         nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose > $LOG 2>&1 &
@@ -167,9 +179,9 @@ do_stop() {
     if check_running "${PID_FILE}"; then
         kill -9 $PID
         rm -f $PID_FILE
-        if $(cat ${CONF} | grep -qE 'plugin|plugin_opts'); then
+        if [ "$UsePlugin" = "1" ]; then
             check_pid "${Plugin}"
-            kill -9 $GET_PID
+            [ -n "$GET_PID" ] && kill -9 $GET_PID
         fi
         echo "Stopping $NAME success"
     else
@@ -184,14 +196,24 @@ do_restart() {
     do_start
 }
 
-case "$1" in
-    start|stop|restart|status)
-    do_$1
-    ;;
-    *)
-    echo "Usage: $0 { start | stop | restart | status }"
-    RET_VAL=1
-    ;;
-esac
+# Only run the service dispatch when executed directly. When the script is
+# sourced (e.g. by the regression test) we expose the functions without
+# touching the system or exiting the caller's shell.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    check_pid "${DAEMON}"
+    check_pid_file "${GET_PID}" "${PID_FILE}"
+    create_pid_dir "${PID_DIR}"
+    get_config_args "${CONF}"
 
-exit $RET_VAL
+    case "$1" in
+        start|stop|restart|status)
+        do_$1
+        ;;
+        *)
+        echo "Usage: $0 { start | stop | restart | status }"
+        RET_VAL=1
+        ;;
+    esac
+
+    exit $RET_VAL
+fi
