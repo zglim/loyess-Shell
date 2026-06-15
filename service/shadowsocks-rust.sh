@@ -74,20 +74,47 @@ check_running() {
 get_config_args(){
     local JsonFilePath=$1
 
-    if [ ! -f $JsonFilePath ]; then
+    if [ ! -f "$JsonFilePath" ]; then
         echo "$NAME config file $JsonFilePath not found"
-        exit 1
+        return 2
     fi
 
     if [ ! "$(command -v jq)" ]; then
         echo "Cannot find dependent package 'jq' Please use yum or apt to install and try again"
-        exit 1
+        return 2
     fi
 
-    # ref: https://stackoverflow.com/questions/53135035/jq-returning-null-as-string-if-the-json-is-empty
-    # ref: https://github.com/stedolan/jq/issues/354#issuecomment-43147898
-    NameServer=$(cat ${JsonFilePath} | jq -r '.nameserver // empty')
-    [ -z "$NameServer" ] && echo -e "Configuration option 'nameserver' acquisition failed" && exit 1
+    # Check whether 'nameserver' key exists in the JSON config.
+    # jq 'has("nameserver")' prints "true" or "false" without erroring on missing keys.
+    local has_key
+    has_key=$(jq 'has("nameserver")' "$JsonFilePath" 2>/dev/null)
+    if [ "$has_key" != "true" ]; then
+        # nameserver field not present — normal, caller should start without --dns
+        NameServer=""
+        return 1
+    fi
+
+    # nameserver key exists; extract value (jq returns "null" for null values,
+    # and empty string via `// empty` when the value is null/missing).
+    # Use direct extraction: if the value is null, jq -r prints "null".
+    NameServer=$(jq -r '.nameserver // empty' "$JsonFilePath" 2>/dev/null)
+
+    if [ -z "$NameServer" ]; then
+        echo "Error: 'nameserver' is defined in config but value is empty or null"
+        return 2
+    fi
+
+    # Basic sanity: reject values that look like they are not a valid address/host
+    # (e.g. raw JSON fragments, booleans, objects). A valid nameserver should be
+    # an IP address, hostname, or a DNS URI like "tls://8.8.8.8".
+    case "$NameServer" in
+        *\{*|*\}*|*true*|*false*|*null*|*\[*|*\]*)
+            echo "Error: 'nameserver' value appears malformed: $NameServer"
+            return 2
+            ;;
+    esac
+
+    return 0
 }
 
 do_status() {
@@ -109,17 +136,36 @@ do_start() {
         return 0
     fi
     ulimit -n 51200
-    if $(grep -q 'nameserver' $CONF); then
-        get_config_args $CONF
-        nohup $DAEMON server -c $CONF --dns $NameServer -vvv > $LOG 2>&1 &
-    else
-        nohup $DAEMON server -c $CONF -vvv > $LOG 2>&1 &
+
+    # Use get_config_args as the single source of truth for nameserver detection.
+    # Return codes: 0 = valid nameserver found, 1 = not present, 2 = error
+    local dns_args=""
+    get_config_args "$CONF"
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        # nameserver present and valid
+        dns_args="--dns $NameServer"
+    elif [ $rc -eq 2 ]; then
+        # nameserver present but invalid — abort without starting
+        echo "Starting $NAME failed: nameserver configuration error"
+        RET_VAL=1
+        return 1
     fi
+    # rc == 1: no nameserver, proceed with plain start (dns_args stays empty)
+
+    nohup $DAEMON server -c "$CONF" $dns_args -vvv > "$LOG" 2>&1 &
+    sleep 0.2
+
     check_pid
-    echo $get_pid > $PID_FILE
+    if [ -n "$get_pid" ]; then
+        echo "$get_pid" > "$PID_FILE"
+    fi
+
     if check_running; then
         echo "Starting $NAME success"
     else
+        # Ensure no stale PID file is left behind on failure
+        rm -f "$PID_FILE"
         echo "Starting $NAME failed"
         RET_VAL=1
     fi
