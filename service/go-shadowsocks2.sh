@@ -63,7 +63,7 @@ create_pid_dir(){
 get_config_args(){
     local JsonFilePath=$1
 
-    if [ ! -f $JsonFilePath ]; then
+    if [ ! -f "$JsonFilePath" ]; then
         echo "$NAME config file $JsonFilePath not found"
         exit 1
     fi
@@ -73,13 +73,16 @@ get_config_args(){
         exit 1
     fi
 
-    ServerPort=$(cat ${JsonFilePath} | jq -r '.server_port // empty')
+    local JsonContent
+    JsonContent=$(cat "$JsonFilePath") || { echo "Failed to read config file $JsonFilePath"; exit 1; }
+
+    ServerPort=$(echo "$JsonContent" | jq -r '.server_port // empty')
     [ -z "$ServerPort" ] && echo -e "Configuration option 'server_port' acquisition failed" && exit 1
-    Password=$(cat ${JsonFilePath} | jq -r '.password // empty')
+    Password=$(echo "$JsonContent" | jq -r '.password // empty')
     [ -z "$Password" ] && echo -e "Configuration option 'password' acquisition failed" && exit 1
-    Method=$(cat ${JsonFilePath} | jq -r '.method // empty')
+    Method=$(echo "$JsonContent" | jq -r '.method // empty')
     [ -z "$Method" ] && echo -e "Configuration option 'method' acquisition failed" && exit 1
-    Mode=$(cat ${JsonFilePath} | jq -r '.mode // empty')
+    Mode=$(echo "$JsonContent" | jq -r '.mode // empty')
     [ -z "$Mode" ] && echo -e "Configuration option 'Mode' acquisition failed" && exit 1
 
     if [[ ${Method} == "aes-128-gcm" ]]; then
@@ -98,11 +101,35 @@ get_config_args(){
         Mode="-tcp -udp"
     fi
 
-    if $(cat ${JsonFilePath} | grep -qE 'plugin|plugin_opts'); then
-        Plugin=$(cat ${JsonFilePath} | jq -r '.plugin // empty')
-        [ -z "$Plugin" ] && echo -e "Configuration option 'plugin' acquisition failed" && exit 1
-        PluginOpts=$(cat ${JsonFilePath} | jq -r '.plugin_opts // empty')
-        [ -z "$PluginOpts" ] && echo -e "Configuration option 'plugin_opts' acquisition failed" && exit 1
+    # Determine whether plugin is enabled: both plugin and plugin_opts must be
+    # present and non-empty in the JSON config.  We parse once and reuse the
+    # result everywhere via the global Plugin / PluginOpts / PluginEnabled vars.
+    Plugin=""
+    PluginOpts=""
+    PluginEnabled=false
+
+    local HasPluginKey HasPluginOptsKey
+    HasPluginKey=$(echo "$JsonContent" | jq -e 'has("plugin")' 2>/dev/null)
+    HasPluginOptsKey=$(echo "$JsonContent" | jq -e 'has("plugin_opts")' 2>/dev/null)
+
+    if [ "$HasPluginKey" = "true" ] && [ "$HasPluginOptsKey" = "true" ]; then
+        Plugin=$(echo "$JsonContent" | jq -r '.plugin // empty')
+        PluginOpts=$(echo "$JsonContent" | jq -r '.plugin_opts // empty')
+
+        if [ -z "$Plugin" ]; then
+            echo "Config contains 'plugin' key but its value is empty or null — cannot start with incomplete plugin configuration"
+            exit 1
+        fi
+        if [ -z "$PluginOpts" ]; then
+            echo "Config contains 'plugin_opts' key but its value is empty or null — cannot start with incomplete plugin configuration"
+            exit 1
+        fi
+        PluginEnabled=true
+    elif [ "$HasPluginKey" = "true" ] || [ "$HasPluginOptsKey" = "true" ]; then
+        # Only one of the two keys is present — this is an incomplete / broken
+        # plugin configuration.  Refuse to start half-configured.
+        echo "Incomplete plugin configuration: both 'plugin' and 'plugin_opts' must be present and non-empty"
+        exit 1
     fi
 }
 
@@ -148,13 +175,13 @@ do_start() {
         return 0
     fi
     ulimit -n 51200
-    if $(cat ${CONF} | grep -qE 'plugin|plugin_opts'); then
-        nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose -plugin ${Plugin} -plugin-opts "${PluginOpts}" > $LOG 2>&1 &
+    if [ "$PluginEnabled" = "true" ]; then
+        nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose -plugin "${Plugin}" -plugin-opts "${PluginOpts}" > "$LOG" 2>&1 &
     else
-        nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose > $LOG 2>&1 &
+        nohup $DAEMON -s "ss://${Method}:${Password}@:${ServerPort}" ${Mode} -verbose > "$LOG" 2>&1 &
     fi
     check_pid "${DAEMON}"
-    echo $GET_PID > $PID_FILE
+    echo $GET_PID > "$PID_FILE"
     if check_running "${PID_FILE}"; then
         echo "Starting $NAME success"
     else
@@ -165,11 +192,13 @@ do_start() {
 
 do_stop() {
     if check_running "${PID_FILE}"; then
-        kill -9 $PID
-        rm -f $PID_FILE
-        if $(cat ${CONF} | grep -qE 'plugin|plugin_opts'); then
+        kill -9 "$PID"
+        rm -f "$PID_FILE"
+        if [ "$PluginEnabled" = "true" ]; then
             check_pid "${Plugin}"
-            kill -9 $GET_PID
+            if [ -n "$GET_PID" ]; then
+                kill -9 "$GET_PID" 2>/dev/null
+            fi
         fi
         echo "Stopping $NAME success"
     else
