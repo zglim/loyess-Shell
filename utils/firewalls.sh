@@ -124,9 +124,16 @@ firewall_status(){
 add_ssh_port(){
     local sshdPort
 
-    if $(grep -qwE "^Port" /etc/ssh/sshd_config); then
-        sshdPort=$(cat /etc/ssh/sshd_config | grep -wE "^Port" | cut -d\  -f2)
-    else
+    # Robustly detect the effective SSH port from sshd_config:
+    # - Skip comment lines (leading # with optional whitespace)
+    # - Match "Port <number>" with flexible whitespace
+    # - Take the first match (sshd uses the first Port directive)
+    # - Fall back to 22 if no Port directive is found
+    sshdPort=$(grep -E '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null \
+        | grep -vE '^[[:space:]]*#' \
+        | head -n 1 \
+        | sed -E 's/^[[:space:]]*Port[[:space:]]+([0-9]+).*/\1/' || true)
+    if [ -z "${sshdPort}" ]; then
         sshdPort=22
     fi
     if [ "${FIREWALL_MANAGE_TOOL}" = 'firewall-cmd' ]; then
