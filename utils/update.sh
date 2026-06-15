@@ -1,8 +1,15 @@
 improt_package "utils" "downloads.sh"
 
 
+# 判断参数是否为数字（纯整数）。
+# 约定：通过退出码返回结果（return 0 = 是数字，return 1 = 不是数字），
+#       不向标准输出写入任何内容，调用方必须使用 if/&&/|| 等结构检测退出码，
+#       禁止使用 $(judge_is_num ...) 做命令替换。
 judge_is_num(){
-    expr ${1} + 1 &>/dev/null
+    if [ -z "${1}" ]; then
+        return 1
+    fi
+    expr "${1}" + 1 &>/dev/null
     if [ $? -ne 0 ]; then
         return 1
     else
@@ -44,16 +51,27 @@ update_download(){
     local downloadMark=$1
     local downloadFileName=$2
     local SS_VERSION plugin_num
-    
+
+    if [ -z "${downloadMark}" ]; then
+        _echo -e "升级标记为空，无法判断下载类型，跳过${downloadFileName}的下载."
+        exit 1
+    fi
+
     TEMP_DIR_PATH=$(mktemp -d)
-    trap "rm -rf $TEMP_DIR_PATH; exit" 2
+    trap 'rm -rf "${TEMP_DIR_PATH}"; exit' 2
     _echo -i "检测到${downloadFileName}有新版本，开始下载."
-    if $(judge_is_num "${downloadMark}"); then
+    # 使用退出码判断，禁止 $(judge_is_num ...) 命令替换
+    if judge_is_num "${downloadMark}"; then
         plugin_num=${downloadMark}
         download_plugins_file
-    else
+    elif [[ "${downloadMark}" == ss-* ]] || [[ "${downloadMark}" == go-ss2 ]]; then
         SS_VERSION=${downloadMark}
         download_ss_file
+    else
+        _echo -e "无法识别的升级标记[${downloadMark}]，跳过${downloadFileName}的下载."
+        rm -rf "${TEMP_DIR_PATH}"
+        trap - 2
+        exit 1
     fi
     _echo -i "${downloadFileName}下载完成，等待安装."
 }
